@@ -198,6 +198,27 @@ Orchestrating-DCHD/
 └── .github/workflows/
     └── harvest.yml            # Optional nightly CI
 ```
+---
+
+### **1. Core Config Files**
+
+**`.gitignore`**
+```gitignore
+.env
+__pycache__/
+*.pyc
+data/raw/*
+data/enriched/*
+.DS_Store
+```
+
+**`.env.example`**
+```env
+REDIS_URL=redis://redis:6379
+IA_EMAIL=your@email.com          # Optional for higher limits
+IA_PASSWORD=your_password
+GITHUB_TOKEN=ghp_...             # Optional for auto-commit
+```
 
 `requirements.txt`:
 ```txt
@@ -209,6 +230,75 @@ redis
 python-dotenv
 tqdm
 ```
+
+---
+
+### **2. Docker Files**
+
+**`Dockerfile.harvester`**
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY harvester/ ./harvester/
+COPY .env.example .env
+VOLUME /app/data
+CMD ["python", "-m", "harvester.harvester"]
+```
+
+**`Dockerfile.reconciler`**
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY reconciler/ ./reconciler/
+COPY .env.example .env
+VOLUME /app/data
+CMD ["python", "-m", "reconciler.worker"]
+```
+
+**`docker-compose.yml`**
+```yaml
+version: '3.9'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  harvester:
+    build:
+      context: .
+      dockerfile: Dockerfile.harvester
+    env_file: .env
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  reconciler:
+    build:
+      context: .
+      dockerfile: Dockerfile.reconciler
+    env_file: .env
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+```
+
+---
+
 
 ### Starter Colab Notebook Template
 Copy-paste the cells below into a new Colab notebook (`File → New notebook`). It includes:
