@@ -174,22 +174,29 @@ This architecture is **completely decoupled**: the harvester only publishes task
 ### Prerequisites (GitHub Repo Setup)
 Create a repo like `ia-cultural-heritage-pipeline`. Folder structure:
 ```
-ia-cultural-heritage-pipeline/
-├── notebooks/
-│   └── 01_ia_harvester_colab.ipynb     # Starter template below
-├── harvester/
-│   └── harvester.py                    # Standalone version
-├── reconciler/
-│   ├── tasks.py                        # Reconciliation logic
-│   └── worker.py                       # rq worker entrypoint
-├── data/
-│   ├── raw/                            # JSONL from harvester
-│   └── enriched/                       # Parquet/JSONL + RDF (optional)
-├── requirements.txt
+Orchestrating-DCHD/
 ├── .env.example
-├── Dockerfile.havrester
+├── .gitignore
+├── README.md                  # (keep + enhance with diagrams)
+├── requirements.txt
+├── docker-compose.yml
+├── Dockerfile.harvester
 ├── Dockerfile.reconciler
-└── README.md
+├── notebooks/
+│   └── 01_ia_harvester_colab.ipynb
+├── harvester/
+│   └── harvester.py
+├── reconciler/
+│   ├── __init__.py
+│   ├── tasks.py               # + RDF export
+│   └── worker.py
+├── data/
+│   ├── raw/                   # .gitkeep
+│   └── enriched/              # .gitkeep
+├── docs/
+│   └── architecture.md        # New: detailed docs + Mermaid
+└── .github/workflows/
+    └── harvest.yml            # Optional nightly CI
 ```
 
 `requirements.txt`:
@@ -391,6 +398,20 @@ Every task is a **self-contained JSON**:
 - Reconciler fetches manifest on-demand if needed (avoids large messages).
 - Results include Wikidata QIDs, Getty IDs, confidence scores → perfect for knowledge graph export.
 
+```mermaid
+flowchart TD
+    A[Internet Archive APIs<br/>Advanced Search + Metadata + IIIF] --> B[Harvester Service<br/>Colab / harvester.py]
+    B -->|"JSON Payload (ItemID key)"| C[Redis + RQ Queue<br/>ia-reconcile]
+    C --> D[Reconciler Worker<br/>tasks.py]
+    D -->|"Enrich against KBs & CVs"| E[Enriched Record]
+    E --> F[RDF Export<br/>rdflib → Turtle/JSON-LD]
+    F --> G[GitHub / HF Dataset / Knowledge Graph]
+    
+    subgraph "Orchestration Layer"
+        C
+    end
+```
+    
 ### Scaling & Cultural Heritage Tips
 - **Incremental sync**: Use IA Changes API (`be-api.us.archive.org/changes/v1`) in harvester for daily runs.
 - **Controlled Vocabularies**: Extend `reconcile_item` with Getty AAT service (`https://services.getty.edu/vocab/reconcile/`).
