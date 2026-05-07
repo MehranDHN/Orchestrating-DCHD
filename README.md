@@ -594,6 +594,206 @@ flowchart TD
 ### Bottom Line
 This integration would extend our pipeline to **model for AI-augmented cultural heritage pipelines**  especially valuable for Persian and non-Western traditions. It aligns perfectly with current trends in multimodal RAG for iconography and agentic workflows in DH.
 
+**✅ Case Study: Shahnama Shah Tahmasp Folios Pipeline**
+
+This limited-scope and simplified example turns our existing decoupled architecture into a **fully working, focused demonstration** for Persian digital cultural heritage.
+
+**Scope of the Case Study**
+- Input: The exact search provided (184 folios from the famous *Shahnama of Shah Tahmasp*).
+- Harvester: Fetches the search JSON → extracts every `identifier` → calls the IA Metadata API (`https://archive.org/metadata/{identifier}`) → optionally adds IIIF manifest URL.
+- Output per item: Clean JSON structure (ready for reconciliation).
+- Reconciler: Consumes the JSON → generates standalone **Turtle (.ttl)** files using a minimal domain-specific ontology (`dchd:`) tailored to Shahnama manuscripts.
+- Everything runs as **decoupled Docker services** (Harvester + Redis + Reconciler) via `docker-compose.yml`.
+- No AI/RAG yet — this proves the core pipeline first.
+
+The pipeline is **100% flexible**: you can run only the harvester, only the reconciler, scale workers, or replace any service without touching the others.
+
+### Updated Repo Structure (Add These Files)
+
+Use the structure from before. Below are the **new/updated files** specifically for this Shahnama case study.
+
+---
+
+**`harvester/harvester.py`** (New — tailored to your search URL)
+
+```python
+import argparse
+import json
+import requests
+import time
+from rq import Queue
+from redis import Redis
+from datetime import datetime
+
+SEARCH_URL = "https://archive.org/advancedsearch.php?q=genre%3A%22Shahnama+Shah+Tahmasp%22&fl[]=identifier&fl[]=title&rows=500&page=1&output=json"
+
+def fetch_search_results():
+    print(f"🔍 Fetching Shahnama Shah Tahmasp search results...")
+    resp = requests.get(SEARCH_URL, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    docs = data.get("response", {}).get("docs", [])
+    print(f"✅ Found {len(docs)} folios.")
+    return docs
+
+def main(max_items=10):  # Limited for demo
+    redis_conn = Redis.from_url("redis://redis:6379")
+    q = Queue("ia-reconcile", connection=redis_conn)
+
+    docs = fetch_search_results()
+    processed = 0
+
+    for doc in docs[:max_items]:
+        item_id = doc.get("identifier")
+        if not item_id:
+            continue
+
+        try:
+            # 1. Full Metadata API
+            meta_url = f"https://archive.org/metadata/{item_id}"
+            meta = requests.get(meta_url, timeout=15).json()
+
+            # 2. IIIF Manifest
+            manifest_url = f"https://iiif.archive.org/iiif/{item_id}/manifest.json"
+
+            payload = {
+                "item_id": item_id,
+                "title": doc.get("title"),
+                "metadata": meta.get("metadata", {}),
+                "files": meta.get("files", []),
+                "iiif_manifest_url": manifest_url,
+                "source": "Shahnama Shah Tahmasp Search",
+                "harvested_at": datetime.utcnow().isoformat()
+            }
+
+            # Save raw JSON
+            with open(f"data/raw/{item_id}.json", "w") as f:
+                json.dump(payload, f, indent=2)
+
+            # Enqueue to reconciler (decoupled!)
+            job = q.enqueue("reconciler.tasks.create_turtle", payload, job_timeout="5m")
+            print(f"✅ Enqueued {item_id} → Job {job.id}")
+
+            processed += 1
+            time.sleep(0.8)  # Polite rate limit
+
+        except Exception as e:
+            print(f"⚠️ Error on {item_id}: {e}")
+
+    print(f"\n🎉 Harvester finished: {processed} items processed and enqueued.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--max", type=int, default=10, help="Max items to process (default 10)")
+    args = parser.parse_args()
+    main(args.max)
+```
+
+---
+
+**`reconciler/tasks.py`** (Updated with simple domain ontology + Turtle export)
+
+```python
+from rq.decorators import job
+import json
+import rdflib
+from rdflib import Graph, Literal, URIRef, Namespace
+from rdflib.namespace import DCTERMS, RDF
+import os
+from datetime import datetime
+
+DCHD = Namespace("https://example.org/dchd/ontology#")   # Your domain ontology
+SHAH = Namespace("https://example.org/shahnama/")
+
+@job("ia-reconcile", timeout="5m", result_ttl=3600)
+def create_turtle(payload: dict):
+    item_id = payload["item_id"]
+    meta = payload.get("metadata", {})
+    title = payload.get("title", meta.get("title", item_id))
+
+    g = Graph()
+    subject = SHAH[item_id]
+
+    # Minimal domain ontology for Shahnama folios
+    g.add((subject, RDF.type, DCHD.ShahnamaFolio))
+    g.add((subject, DCHD.hasIdentifier, Literal(item_id)))
+    g.add((subject, DCTERMS.title, Literal(title)))
+    g.add((subject, DCHD.fromManuscript, Literal("Shahnama of Shah Tahmasp")))
+    g.add((subject, DCHD.iiifManifest, URIRef(payload["iiif_manifest_url"])))
+    g.add((subject, DCTERMS.created, Literal(meta.get("date", "unknown"))))
+    g.add((subject, DCTERMS.description, Literal(meta.get("description", ""))))
+
+    # Add any subjects/creator from metadata
+    if "subject" in meta:
+        for s in meta["subject"] if isinstance(meta["subject"], list) else [meta["subject"]]:
+            g.add((subject, DCTERMS.subject, Literal(s)))
+
+    # Save Turtle
+    os.makedirs("data/enriched", exist_ok=True)
+    ttl_path = f"data/enriched/{item_id}.ttl"
+    g.serialize(destination=ttl_path, format="turtle")
+
+    # Also save enriched JSON for reference
+    enriched = {**payload, "rdf_turtle_path": ttl_path, "enriched_at": datetime.utcnow().isoformat()}
+    with open(f"data/enriched/{item_id}.json", "w") as f:
+        json.dump(enriched, f, indent=2)
+
+    print(f"📄 Generated Turtle → {ttl_path}")
+    return ttl_path
+```
+
+---
+
+**`reconciler/worker.py`** (unchanged, but confirm it exists)
+
+```python
+from rq import Worker, Queue
+from redis import Redis
+import os
+
+redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379"))
+queues = [Queue("ia-reconcile", connection=redis_conn)]
+worker = Worker(queues, connection=redis_conn)
+worker.work(with_scheduler=True)
+```
+
+---
+
+**`docker-compose.yml`** (ready — no changes needed)
+
+(Use the exact previous version. It starts Redis + Harvester + Reconciler as standalone containers.)
+
+---
+
+### How to Run the Full Decoupled Pipeline (Case Study Demo)
+
+```bash
+# 1. Clone / update your repo
+cd Orchestrating-DCHD
+
+# 2. Create the folders if missing
+mkdir -p data/raw data/enriched notebooks harvester reconciler
+
+# 3. Add the files above
+
+# 4. Build & run (decoupled services)
+docker compose up --build -d
+
+# 5. Watch the magic
+docker compose logs -f harvester   # See search + enqueue
+docker compose logs -f reconciler  # See Turtle generation
+```
+
+After ~1–2 minutes you will have:
+- `data/raw/*.json` → new structured JSON ready for reconciliation
+- `data/enriched/*.ttl` → standalone Turtle files for your Knowledge Graph
+
+You can stop any container independently (e.g. `docker compose stop harvester`) and the rest keeps working.
+
+---
+
+
+
 
 
 
