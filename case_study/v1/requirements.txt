@@ -1,0 +1,9 @@
+internetarchive>=4.0
+requests
+pandas
+tqdm
+rq
+redis
+python-dotenv
+rdflib
+gitpython>=3.1
